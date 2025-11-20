@@ -79,7 +79,12 @@ class STLTMemory(Memory):
                 {self.long_term_memory}
             """
 
-        self.long_term_memory = self.llm.generate(prompt)
+        response = self.llm.generate(prompt)
+        # Handle both response objects and strings
+        if hasattr(response, "choices"):
+            self.long_term_memory = response.choices[0].message.content
+        else:
+            self.long_term_memory = str(response)
 
     def process_step(self, pre_step: bool = False):
         """

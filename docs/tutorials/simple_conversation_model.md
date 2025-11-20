@@ -2,13 +2,13 @@
 
 ## Introduction
 
-This tutorial will guide you through creating your first agent-based model using Mesa-LLM. We'll build a simple **Conversation Model** where LLM-powered agents interact with each other based on their personalities.
+This tutorial will guide you through creating your first agent-based model using Mesa-LLM. We'll build a simple **Conversation Model** where LLM-powered agents with different personalities interact with each other using the ReAct reasoning framework.
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- Basic understanding of Python programming
-- An API key for one of the supported LLM providers (OpenAI, Anthropic, Ollama, etc.)
+- Python 3.11 or higher
+- Basic understanding of Python programming and Mesa framework
+- An API key for at least one supported LLM provider (OpenAI, Anthropic, Google, xAI, etc.)
 
 ## Installation
 
@@ -24,293 +24,370 @@ For development or latest features:
 pip install -U --pre mesa-llm
 ```
 
+You'll also need the `python-dotenv` package to manage API keys:
+
+```bash
+pip install python-dotenv
+```
+
+## Setting Up Your API Keys
+
+1. **Create a `.env` file** in your project root directory:
+
+```bash
+# .env file
+OPENAI_API_KEY=your-openai-key-here
+# OR use any other supported provider:
+# ANTHROPIC_API_KEY=your-anthropic-key-here
+# GOOGLE_API_KEY=your-google-key-here
+```
+
+2. **Load the API key in your Python code:**
+
+```python
+from dotenv import load_dotenv
+load_dotenv()  # This loads your .env file
+```
+
 ## What We'll Build
 
 We'll create a simple social interaction model where:
-- Multiple agents with different personalities interact
-- Each agent uses an LLM to generate responses
-- Agents can communicate with each other
-- We'll visualize the interactions
+- Multiple agents with different personalities interact using LLMs
+- Agents use the ReAct (Reasoning + Acting) framework to think before speaking
+- Agents maintain short-term and long-term memory of interactions
+- We'll collect data on agent interactions
 
-## Step 1: Setting Up the Environment
+## Step 1: Understanding LLMAgent
 
-Create a new Python file called `conversation_model.py`:
+Before we build our model, let's understand the key components:
+
+- **LLMAgent**: The base class for LLM-powered agents in Mesa-LLM
+- **Reasoning**: The decision-making framework (we'll use ReAct)
+- **Memory**: Agents automatically get STLTMemory (Short-Term/Long-Term Memory)
+- **ToolManager**: Manages tools that agents can use (we'll use `speak_to` tool)
+
+## Step 2: Create the Conversation Model File
+
+Create a new file called `conversation_model.py`:
 
 ```python
-import os
 from mesa import Model
 from mesa.time import RandomActivation
-from mesa_llm import LLMAgent
-from mesa_llm.llm import OpenAILLM  # or your preferred LLM provider
+from mesa.datacollection import DataCollector
+from mesa_llm.llm_agent import LLMAgent
+from mesa_llm.reasoning.react import ReAct
 
-# Set your API key (better to use environment variables)
-os.environ["OPENAI_API_KEY"] = "your-api-key-here"
-```
 
-## Step 2: Create the LLM-Powered Agent
-
-```python
 class ConversationAgent(LLMAgent):
-    """An agent that can converse using LLMs"""
+    """An agent that can converse with other agents using LLMs and ReAct reasoning."""
     
-    def __init__(self, unique_id, model, personality):
-        super().__init__(unique_id, model)
-        self.personality = personality
-        self.conversation_history = []
+    def __init__(self, model, reasoning, llm_model, personality, system_prompt):
+        """
+        Initialize a conversation agent.
         
-        # Initialize the LLM for this agent
-        self.llm = OpenAILLM(
-            model_name="gpt-4",
-            temperature=0.7
+        Args:
+            model: The Mesa model instance
+            reasoning: The reasoning framework (ReAct)
+            llm_model: The LLM model in format 'provider/model_name'
+            personality: A description of the agent's personality
+            system_prompt: The system prompt for the agent
+        """
+        super().__init__(
+            model=model,
+            reasoning=reasoning,
+            llm_model=llm_model,
+            system_prompt=system_prompt,
+            internal_state=[personality]  # Store personality as internal state
         )
-    
-    def generate_greeting(self):
-        """Generate an initial greeting based on personality"""
-        prompt = f"""You are a person with the following personality: {self.personality}
-        
-Generate a short, casual greeting or opening statement (1-2 sentences).
-Just respond with the greeting, nothing else."""
-        
-        response = self.llm.generate(prompt)
-        self.conversation_history.append({
-            "speaker": f"Agent {self.unique_id}",
-            "message": response
-        })
-        return response
-    
-    def respond_to(self, message, speaker_id):
-        """Generate a response to another agent's message"""
-        prompt = f"""You are a person with the following personality: {self.personality}
+        self.personality = personality
+        self.messages_sent = 0
 
-Someone just said to you: "{message}"
 
-Respond naturally in 1-2 sentences. Be conversational and stay in character.
-Just respond with your reply, nothing else."""
-        
-        response = self.llm.generate(prompt)
-        self.conversation_history.append({
-            "speaker": f"Agent {self.unique_id}",
-            "responding_to": speaker_id,
-            "message": response
-        })
-        return response
-    
-    def step(self):
-        """Called at each step of the model"""
-        # If this is the first step, introduce yourself
-        if self.model.schedule.steps == 1:
-            greeting = self.generate_greeting()
-            print(f"Agent {self.unique_id}: {greeting}")
-        else:
-            # Randomly choose another agent to respond to
-            other_agents = [a for a in self.model.schedule.agents if a != self]
-            if other_agents and len(other_agents[0].conversation_history) > 0:
-                target = self.random.choice(other_agents)
-                last_message = target.conversation_history[-1]["message"]
-                response = self.respond_to(last_message, target.unique_id)
-                print(f"Agent {self.unique_id} → Agent {target.unique_id}: {response}")
-```
-
-## Step 3: Create the Model
-
-```python
 class ConversationModel(Model):
-    """A model where agents converse with each other"""
+    """A model where agents converse with each other using ReAct reasoning."""
     
-    def __init__(self, n_agents=3, personalities=None):
-        super().__init__()
+    def __init__(
+        self,
+        n_agents: int = 3,
+        llm_model: str = "openai/gpt-4o-mini",
+        seed: int = None
+    ):
+        """
+        Initialize the conversation model.
+        
+        Args:
+            n_agents: Number of agents to create
+            llm_model: LLM model in format 'provider/model_name'
+            seed: Random seed for reproducibility
+        """
+        super().__init__(seed=seed)
         self.num_agents = n_agents
         self.schedule = RandomActivation(self)
+        self.llm_model = llm_model
         
-        # Default personalities if none provided
-        if personalities is None:
-            personalities = [
-                "friendly and outgoing",
-                "shy and thoughtful",
-                "humorous and witty"
-            ]
+        # Define personalities for agents
+        personalities = [
+            "friendly and outgoing, always eager to help others",
+            "thoughtful and philosophical, likes to reflect deeply",
+            "witty and humorous, enjoys making jokes"
+        ]
         
         # Create agents
         for i in range(self.num_agents):
             personality = personalities[i % len(personalities)]
-            agent = ConversationAgent(i, self, personality)
+            
+            # System prompt tells the agent their role and personality
+            system_prompt = (
+                f"You are Agent {i} with the following personality: {personality}. "
+                f"You are participating in a casual conversation. Be natural and conversational. "
+                f"Use the speak_to tool to communicate with other agents."
+            )
+            
+            agent = ConversationAgent(
+                model=self,
+                reasoning=ReAct,  # Using ReAct reasoning framework
+                llm_model=llm_model,
+                personality=personality,
+                system_prompt=system_prompt
+            )
             self.schedule.add(agent)
+        
+        # Set up data collection
+        self.datacollector = DataCollector(
+            model_reporters={
+                "Total Messages": self._count_total_messages
+            },
+            agent_reporters={
+                "Messages Sent": "messages_sent"
+            }
+        )
+    
+    def _count_total_messages(self):
+        """Count total messages sent by all agents."""
+        return sum(agent.messages_sent for agent in self.schedule.agents)
     
     def step(self):
-        """Advance the model by one step"""
+        """Execute one step of the model."""
         self.schedule.step()
+        self.datacollector.collect(self)
 ```
 
-## Step 4: Run the Model
+## Step 3: Create a Script to Run the Model
+
+Create a file called `run_conversation.py`:
 
 ```python
+from dotenv import load_dotenv
+from conversation_model import ConversationModel
+
+# Load API keys from .env file
+load_dotenv()
+
 def main():
+    """Run the conversation model."""
+    
     # Create the model with 3 agents
+    # Available models: 'openai/gpt-4o', 'anthropic/claude-3-sonnet', etc.
     model = ConversationModel(
         n_agents=3,
-        personalities=[
-            "enthusiastic and energetic",
-            "calm and philosophical",
-            "sarcastic but kind-hearted"
-        ]
+        llm_model="openai/gpt-4o-mini"  # Change this to your preferred model
     )
     
-    # Run for 5 steps (rounds of conversation)
+    # Run for 3 steps
     print("=== Starting Conversation Simulation ===\n")
-    for i in range(5):
-        print(f"\n--- Round {i+1} ---")
+    
+    for step_num in range(3):
+        print(f"\n--- Step {step_num + 1} ---")
         model.step()
     
-    print("\n=== Simulation Complete ===")
+    print("\n=== Simulation Complete ===\n")
+    
+    # Print collected data
+    print("Data Collection Results:")
+    model_data = model.datacollector.get_model_vars_dataframe()
+    print("\nModel Data:")
+    print(model_data)
+    
+    agent_data = model.datacollector.get_agent_vars_dataframe()
+    print("\nAgent Data:")
+    print(agent_data)
+
 
 if __name__ == "__main__":
     main()
 ```
 
-## Step 5: Running Your Model
+## Step 4: Using Different LLM Providers
 
-Save your file and run it:
+Mesa-LLM uses litellm to support multiple providers. You can use any of these models by specifying them in the format `provider/model_name`:
+
+### OpenAI Models
+```python
+llm_model = "openai/gpt-4o"
+llm_model = "openai/gpt-4o-mini"  # Cheaper option
+llm_model = "openai/gpt-3.5-turbo"
+```
+
+Set your API key in `.env`:
+```
+OPENAI_API_KEY=your-key-here
+```
+
+### Anthropic (Claude)
+```python
+llm_model = "anthropic/claude-3-sonnet-20240229"
+llm_model = "anthropic/claude-3-haiku-20240307"
+```
+
+Set your API key in `.env`:
+```
+ANTHROPIC_API_KEY=your-key-here
+```
+
+### Google Gemini
+```python
+llm_model = "gemini/gemini-2.0-flash"
+llm_model = "gemini/gemini-1.5-pro"
+```
+
+Set your API key in `.env`:
+```
+GOOGLE_API_KEY=your-key-here
+```
+
+### Local Models with Ollama
+
+For free local models, install Ollama and run:
 
 ```bash
-python conversation_model.py
+# Install from https://ollama.ai
+# Then pull a model
+ollama pull llama2
+ollama pull mistral
+
+# Use in your code
+llm_model = "ollama/llama2"
 ```
 
-You should see output like:
+## Step 5: Understanding Key Components
 
+### ReAct Framework
+The ReAct (Reasoning + Acting) framework makes agents think through their decisions before acting:
+- **Reasoning**: The agent thinks about what to do
+- **Acting**: The agent then uses tools to execute the plan
+
+### Memory
+Agents automatically get STLTMemory (Short-Term/Long-Term Memory) which:
+- Stores recent interactions in short-term memory
+- Consolidates old memories into long-term summaries
+- Prevents context length exceeded errors
+
+### Tools
+Agents can use tools like `speak_to` to communicate with others. Tools are automatically registered.
+
+## Step 6: Running Your Model
+
+1. **Set up your environment:**
+```bash
+pip install mesa-llm python-dotenv
 ```
-=== Starting Conversation Simulation ===
 
---- Round 1 ---
-Agent 0: Hey there! I'm super excited to chat with everyone today!
-Agent 1: Hello. It's nice to meet you all in this moment of presence.
-Agent 2: Oh great, another group chat. Just what I needed today... kidding, hi everyone!
+2. **Create your `.env` file** with API keys
 
---- Round 2 ---
-Agent 1 → Agent 0: Your enthusiasm is contagious. It reminds me that joy can be found in simple connections.
-Agent 2 → Agent 1: Wow, that's actually pretty deep. Are you always this zen?
-Agent 0 → Agent 2: Haha, I love your sense of humor! We're going to have a great time!
-...
+3. **Run the model:**
+```bash
+python run_conversation.py
 ```
 
-## Using Different LLM Providers
+## Adding More Advanced Features
 
-### Using Anthropic (Claude)
+### Example: Custom Tools
+
+You can add custom tools for agents to use:
 
 ```python
-from mesa_llm.llm import AnthropicLLM
+from mesa_llm.tools.tool_decorator import tool
 
-self.llm = AnthropicLLM(
-    model_name="claude-3-sonnet-20240229",
-    temperature=0.7
-)
+@tool
+def share_opinion(agent, opinion: str) -> str:
+    """Share an opinion with other agents."""
+    return f"Agent {agent.unique_id} shares: {opinion}"
+
+# Register the tool in your agent's step method
+agent.tool_manager.register_tool(share_opinion)
 ```
 
-### Using Ollama (Local Models)
+### Example: Spatial Interactions
+
+To add spatial interactions, use Mesa's grid:
 
 ```python
-from mesa_llm.llm import OllamaLLM
+from mesa.space import MultiGrid
 
-self.llm = OllamaLLM(
-    model_name="llama2",
-    temperature=0.7
-)
-```
-
-### Using Hugging Face
-
-```python
-from mesa_llm.llm import HuggingFaceLLM
-
-self.llm = HuggingFaceLLM(
-    model_name="meta-llama/Llama-2-7b-chat-hf",
-    temperature=0.7
-)
+class SpatialConversationModel(ConversationModel):
+    def __init__(self, n_agents=3, llm_model="openai/gpt-4o-mini"):
+        super().__init__(n_agents, llm_model)
+        self.grid = MultiGrid(width=10, height=10, torus=False)
+        
+        # Place agents randomly on the grid
+        for agent in self.schedule.agents:
+            x = self.random.randrange(self.grid.width)
+            y = self.random.randrange(self.grid.height)
+            self.grid.place_agent(agent, (x, y))
 ```
 
 ## Next Steps
 
 Now that you've built your first mesa-llm model, you can:
 
-1. **Add Memory**: Implement longer conversation histories
-2. **Add Spatial Elements**: Place agents in a grid and have them interact with neighbors
-3. **Data Collection**: Use Mesa's DataCollector to track conversation metrics
-4. **Visualization**: Create a browser-based visualization of the interactions
-5. **Complex Behaviors**: Add planning, reasoning, or decision-making modules
+1. **Explore Other Reasoning Frameworks**: Try Chain-of-Thought (CoT), ReWOO, or other reasoning methods
+2. **Add Spatial Elements**: Place agents on a grid and have them interact with neighbors
+3. **Implement Custom Tools**: Create domain-specific tools for your agents
+4. **Complex Negotiations**: Build multi-step negotiation scenarios like the negotiation example
+5. **Visualization**: Create interactive visualizations with Solara (see negotiation example's app.py)
 
-## Advanced Example: Adding Data Collection
+## Reference Models
 
-```python
-from mesa.datacollection import DataCollector
+Check out the example models in the mesa-llm repository:
 
-class ConversationModel(Model):
-    def __init__(self, n_agents=3, personalities=None):
-        super().__init__()
-        # ... previous initialization code ...
-        
-        # Add data collection
-        self.datacollector = DataCollector(
-            model_reporters={
-                "Total Messages": lambda m: sum(len(a.conversation_history) 
-                                               for a in m.schedule.agents)
-            },
-            agent_reporters={
-                "Messages Sent": lambda a: len(a.conversation_history)
-            }
-        )
-    
-    def step(self):
-        self.schedule.step()
-        self.datacollector.collect(self)
+- **Negotiation Model** (`examples/negotiation/`): A complete example with buyer and seller agents
+- **Epstein Civil Violence Model** (`examples/epstein_civil_violence/`): A complex agent-based model
 
-# After running the model:
-model_data = model.datacollector.get_model_vars_dataframe()
-agent_data = model.datacollector.get_agent_vars_dataframe()
-print(model_data)
-print(agent_data)
-```
+## Summary
 
-## Common Issues and Solutions
+In this tutorial, you learned:
+- How to install and set up Mesa-LLM
+- How to create LLM-powered agents using the LLMAgent class
+- How to use the ReAct reasoning framework
+- How to build a simple model with agent interactions
+- How to collect and analyze data from your simulations
+- How to use different LLM providers
 
-### Issue: API Rate Limits
-**Solution**: Add delays between LLM calls or use batching
+Mesa-LLM handles complexity for you:
+- **Memory Management**: Agents automatically maintain short-term and long-term memory
+- **Rate Limiting**: The library includes built-in retry logic via tenacity
+- **Context Management**: STLTMemory prevents context length exceeded errors
+- **Tool Management**: Tools are automatically managed and callable by agents
 
-```python
-import time
+## Troubleshooting
 
-def step(self):
-    time.sleep(0.5)  # Add a small delay
-    # ... rest of step logic
-```
+**Issue: "API key not found"**
+- Make sure your `.env` file exists and has the correct key name
+- Verify you've called `load_dotenv()` before creating the model
 
-### Issue: Context Length Exceeded
-**Solution**: Limit conversation history
+**Issue: "Module not found: mesa_llm"**
+- Reinstall with: `pip install -U mesa-llm`
 
-```python
-def step(self):
-    # Keep only last 5 messages
-    if len(self.conversation_history) > 5:
-        self.conversation_history = self.conversation_history[-5:]
-```
-
-### Issue: Expensive API Costs
-**Solution**: Use a local model with Ollama
-
-```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull a model
-ollama pull llama2
-
-# Use in your code
-self.llm = OllamaLLM(model_name="llama2")
-```
+**Issue: Slow responses**
+- Try using cheaper/faster models like `gpt-4o-mini` or `claude-3-haiku`
+- Use local models with Ollama for free
 
 ## Resources
 
 - [Mesa Documentation](https://mesa.readthedocs.io/)
 - [Mesa-LLM GitHub Repository](https://github.com/projectmesa/mesa-llm)
-- [Mesa Examples](https://github.com/projectmesa/mesa-examples)
+- [Mesa-LLM API Documentation](https://mesa-llm.readthedocs.io/)
+- [Negotiation Example Model](https://github.com/projectmesa/mesa-llm/tree/main/examples/negotiation)
 - [Join the Mesa Matrix Chat](https://matrix.to/#/#mesa-llm:matrix.org)
 
 ## Contributing
@@ -320,3 +397,4 @@ Found a bug or have a suggestion? Please file an issue on the [GitHub repository
 ---
 
 **Tutorial created for Issue #32 - "Make a simple mesa-llm tutorial"**
+**Fixed based on PR #34 feedback to use correct API and tested implementations**

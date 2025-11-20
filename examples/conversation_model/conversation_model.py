@@ -1,308 +1,157 @@
 """
-Simple Mesa-LLM Conversation Model
-A beginner-friendly example showing how to create LLM-powered agents that interact.
+Simple Conversation Model for Mesa-LLM
 
-This model demonstrates:
-- Creating LLM-powered agents with different personalities
-- Agent-to-agent communication
-- Basic conversation flow
-- Data collection
-
-Usage:
-    python conversation_model.py
-
-Make sure to set your API key first:
-    export OPENAI_API_KEY="your-key-here"
-    # or for Anthropic: export ANTHROPIC_API_KEY="your-key-here"
+This is a beginner-friendly example showing how to create LLM-powered agents
+that interact with each other using the ReAct reasoning framework.
 """
 
-import os
-from mesa import Model, Agent
-from mesa.time import RandomActivation
+from mesa import Model
+"""
+Simple in-file scheduler to avoid relying on `mesa.time.RandomActivation`,
+which may not be available in all installed Mesa versions. This scheduler
+implements the small subset used by the example: `add()` and `step()` and
+exposes the `agents` list used by `DataCollector`.
+"""
+
+
+class SimpleScheduler:
+    def __init__(self, model):
+        self.model = model
+        self.agents = []
+
+    def add(self, agent):
+        self.agents.append(agent)
+
+    def step(self):
+        # iterate over a copy so agents can modify schedule safely
+        for agent in list(self.agents):
+            agent.step()
 from mesa.datacollection import DataCollector
-
-# For this example, you'll need to install mesa-llm
-# pip install mesa-llm
-
-try:
-    from mesa_llm.llm import OpenAILLM
-    # Alternative imports if you want to use different providers:
-    # from mesa_llm.llm import AnthropicLLM
-    # from mesa_llm.llm import OllamaLLM
-except ImportError:
-    print("Error: mesa-llm not installed. Please run: pip install mesa-llm")
-    exit(1)
+from mesa_llm.llm_agent import LLMAgent
+from mesa_llm.reasoning.react import ReActReasoning as ReAct
 
 
-class ConversationAgent(Agent):
-    """
-    An agent that uses an LLM to generate conversational responses.
-    
-    Attributes:
-        unique_id: Unique identifier for the agent
-        model: The model this agent belongs to
-        personality: A description of the agent's personality
-        conversation_history: List of messages this agent has sent
-        llm: The language model used for generating responses
-    """
-    
-    def __init__(self, unique_id, model, personality, llm_provider="openai"):
+class ConversationAgent(LLMAgent):
+    """An agent that can converse with other agents using LLMs and ReAct reasoning."""
+
+    def __init__(self, model, reasoning, llm_model, personality, system_prompt):
         """
         Initialize a conversation agent.
-        
+
         Args:
-            unique_id: Unique identifier for the agent
-            model: The Mesa model this agent belongs to
-            personality: String describing the agent's personality
-            llm_provider: Which LLM provider to use (openai, anthropic, ollama)
+            model: The Mesa model instance
+            reasoning: The reasoning framework (ReAct)
+            llm_model: The LLM model in format 'provider/model_name'
+            personality: A description of the agent's personality
+            system_prompt: The system prompt for the agent
         """
-        super().__init__(unique_id, model)
+        super().__init__(
+            model=model,
+            reasoning=reasoning,
+            llm_model=llm_model,
+            system_prompt=system_prompt,
+            internal_state=[personality],  # Store personality as internal state
+        )
         self.personality = personality
-        self.conversation_history = []
-        
-        # Initialize the appropriate LLM
-        if llm_provider.lower() == "openai":
-            self.llm = OpenAILLM(
-                model_name="gpt-3.5-turbo",  # Using cheaper model for tutorial
-                temperature=0.7
-            )
-        # Add more providers as needed
-        else:
-            raise ValueError(f"Unknown LLM provider: {llm_provider}")
-    
-    def generate_greeting(self):
-        """
-        Generate an initial greeting based on the agent's personality.
-        
-        Returns:
-            str: The generated greeting message
-        """
-        prompt = f"""You are a person with the following personality: {self.personality}
+        self.messages_sent = 0
 
-Generate a short, casual greeting or opening statement (1-2 sentences).
-Just respond with the greeting, nothing else."""
-        
-        try:
-            response = self.llm.generate(prompt)
-            self.conversation_history.append({
-                "speaker": f"Agent {self.unique_id}",
-                "message": response,
-                "step": self.model.schedule.steps
-            })
-            return response
-        except Exception as e:
-            return f"[Error generating greeting: {e}]"
-    
-    def respond_to(self, message, speaker_id):
-        """
-        Generate a response to another agent's message.
-        
-        Args:
-            message: The message to respond to
-            speaker_id: ID of the agent who sent the message
-            
-        Returns:
-            str: The generated response
-        """
-        prompt = f"""You are a person with the following personality: {self.personality}
-
-Someone just said to you: "{message}"
-
-Respond naturally in 1-2 sentences. Be conversational and stay in character.
-Just respond with your reply, nothing else."""
-        
-        try:
-            response = self.llm.generate(prompt)
-            self.conversation_history.append({
-                "speaker": f"Agent {self.unique_id}",
-                "responding_to": speaker_id,
-                "message": response,
-                "step": self.model.schedule.steps
-            })
-            return response
-        except Exception as e:
-            return f"[Error generating response: {e}]"
-    
     def step(self):
-        """
-        Execute one step of agent behavior.
-        Called by the scheduler at each time step.
-        """
-        # First step: introduce yourself
-        if self.model.schedule.steps == 1:
-            greeting = self.generate_greeting()
-            print(f"  Agent {self.unique_id}: {greeting}")
-        
-        # Subsequent steps: respond to others
-        else:
-            # Get all other agents
-            other_agents = [a for a in self.model.schedule.agents if a != self]
-            
-            if other_agents:
-                # Pick a random agent who has spoken
-                agents_with_messages = [a for a in other_agents 
-                                       if len(a.conversation_history) > 0]
-                
-                if agents_with_messages:
-                    # Choose a random agent to respond to
-                    target = self.random.choice(agents_with_messages)
-                    last_message = target.conversation_history[-1]["message"]
-                    
-                    # Generate and print response
-                    response = self.respond_to(last_message, target.unique_id)
-                    print(f"  Agent {self.unique_id} → Agent {target.unique_id}: {response}")
+        """Execute one step of the agent."""
+        # For this simple example we don't rely on spatial observations;
+        # pass None to reasoning.plan so the agent will use its system/step prompts.
+        observation = None
+
+        # Create a prompt for the agent
+        prompt = (
+            "You are participating in a casual conversation. "
+            "If there are other agents nearby, try to engage in conversation. "
+            "Use the speak_to tool to communicate with them. "
+            "Be natural and stay true to your personality."
+        )
+
+        # Use ReAct reasoning to generate a plan
+        plan = self.reasoning.plan(
+            prompt=prompt, obs=observation, selected_tools=["speak_to"]
+        )
+
+        # Apply the plan (execute the tools)
+        self.apply_plan(plan)
+        self.messages_sent += 1
+
+    async def astep(self):
+        """Async version of step for parallel execution."""
+        observation = None
+
+        prompt = (
+            "You are participating in a casual conversation. "
+            "If there are other agents nearby, try to engage in conversation. "
+            "Use the speak_to tool to communicate with them. "
+            "Be natural and stay true to your personality."
+        )
+
+        plan = await self.reasoning.aplan(
+            prompt=prompt, obs=observation, selected_tools=["speak_to"]
+        )
+
+        self.apply_plan(plan)
+        self.messages_sent += 1
 
 
 class ConversationModel(Model):
-    """
-    A model where agents converse with each other using LLMs.
-    
-    This model demonstrates basic mesa-llm functionality with:
-    - Multiple agents with different personalities
-    - LLM-powered conversation generation
-    - Random activation scheduling
-    - Data collection
-    """
-    
-    def __init__(self, n_agents=3, personalities=None, llm_provider="openai"):
+    """A model where agents converse with each other using ReAct reasoning."""
+
+    def __init__(self, n_agents: int = 3, llm_model: str = "openai/gpt-4o-mini", seed: int = None):
         """
         Initialize the conversation model.
-        
+
         Args:
             n_agents: Number of agents to create
-            personalities: List of personality descriptions (optional)
-            llm_provider: Which LLM provider to use
+            llm_model: LLM model in format 'provider/model_name'
+            seed: Random seed for reproducibility
         """
-        super().__init__()
+        super().__init__(seed=seed)
         self.num_agents = n_agents
-        self.schedule = RandomActivation(self)
-        
-        # Default personalities if none provided
-        if personalities is None:
-            personalities = [
-                "friendly and outgoing",
-                "shy and thoughtful",
-                "humorous and witty",
-                "intellectual and curious",
-                "energetic and enthusiastic"
-            ]
-        
-        # Create agents with assigned personalities
+        self.schedule = SimpleScheduler(self)
+        self.llm_model = llm_model
+
+        # Define personalities for agents
+        personalities = [
+            "friendly and outgoing, always eager to help others",
+            "thoughtful and philosophical, likes to reflect deeply",
+            "witty and humorous, enjoys making jokes",
+        ]
+
+        # Create agents
         for i in range(self.num_agents):
             personality = personalities[i % len(personalities)]
-            agent = ConversationAgent(i, self, personality, llm_provider)
+
+            # System prompt tells the agent their role and personality
+            system_prompt = (
+                f"You are Agent {i} with the following personality: {personality}. "
+                f"You are participating in a casual conversation. Be natural and conversational. "
+                f"Use the speak_to tool to communicate with other agents."
+            )
+
+            agent = ConversationAgent(
+                model=self,
+                reasoning=ReAct,  # Using ReAct reasoning framework
+                llm_model=llm_model,
+                personality=personality,
+                system_prompt=system_prompt,
+            )
             self.schedule.add(agent)
-        
+
         # Set up data collection
         self.datacollector = DataCollector(
-            model_reporters={
-                "Total Messages": lambda m: sum(len(a.conversation_history) 
-                                               for a in m.schedule.agents),
-                "Step": lambda m: m.schedule.steps
-            },
-            agent_reporters={
-                "Messages Sent": lambda a: len(a.conversation_history),
-                "Personality": lambda a: a.personality
-            }
+            model_reporters={"Total Messages": self._count_total_messages},
+            agent_reporters={"Messages Sent": "messages_sent"},
         )
-    
+
+    def _count_total_messages(self):
+        """Count total messages sent by all agents."""
+        return sum(agent.messages_sent for agent in self.schedule.agents)
+
     def step(self):
-        """Advance the model by one step."""
+        """Execute one step of the model."""
         self.schedule.step()
         self.datacollector.collect(self)
-
-
-def main():
-    """
-    Main function to run the conversation model.
-    """
-    # Check for API key
-    if "OPENAI_API_KEY" not in os.environ:
-        print("Warning: OPENAI_API_KEY not found in environment variables.")
-        print("Please set it with: export OPENAI_API_KEY='your-key-here'")
-        print("\nAlternatively, you can use Ollama (local, free):")
-        print("1. Install Ollama: https://ollama.com")
-        print("2. Run: ollama pull llama2")
-        print("3. Change llm_provider='ollama' in the code")
-        return
-    
-    print("=" * 60)
-    print("Mesa-LLM Conversation Model Tutorial")
-    print("=" * 60)
-    
-    # Create the model with 3 agents and distinct personalities
-    personalities = [
-        "enthusiastic and energetic, loves to share ideas",
-        "calm and philosophical, often contemplates deeper meaning",
-        "sarcastic but kind-hearted, uses humor to connect"
-    ]
-    
-    model = ConversationModel(
-        n_agents=3,
-        personalities=personalities,
-        llm_provider="openai"
-    )
-    
-    print(f"\nCreated {model.num_agents} agents with the following personalities:")
-    for agent in model.schedule.agents:
-        print(f"  - Agent {agent.unique_id}: {agent.personality}")
-    
-    # Run the simulation
-    print("\n" + "=" * 60)
-    print("Starting Conversation Simulation")
-    print("=" * 60 + "\n")
-    
-    num_steps = 5
-    for i in range(num_steps):
-        print(f"--- Round {i+1}/{num_steps} ---")
-        model.step()
-        print()
-    
-    # Display results
-    print("=" * 60)
-    print("Simulation Complete - Summary Statistics")
-    print("=" * 60)
-    
-    # Get collected data
-    model_data = model.datacollector.get_model_vars_dataframe()
-    agent_data = model.datacollector.get_agent_vars_dataframe()
-    
-    print(f"\nTotal messages exchanged: {model_data['Total Messages'].iloc[-1]}")
-    print("\nMessages per agent:")
-    for agent in model.schedule.agents:
-        count = len(agent.conversation_history)
-        print(f"  Agent {agent.unique_id}: {count} messages")
-    
-    # Optional: Print full conversation history
-    print("\n" + "=" * 60)
-    print("Full Conversation History")
-    print("=" * 60 + "\n")
-    
-    all_messages = []
-    for agent in model.schedule.agents:
-        all_messages.extend(agent.conversation_history)
-    
-    # Sort by step
-    all_messages.sort(key=lambda x: x.get('step', 0))
-    
-    for msg in all_messages:
-        speaker = msg['speaker']
-        text = msg['message']
-        if 'responding_to' in msg:
-            print(f"{speaker} → Agent {msg['responding_to']}: {text}")
-        else:
-            print(f"{speaker}: {text}")
-    
-    print("\n" + "=" * 60)
-    print("Tutorial Complete!")
-    print("=" * 60)
-    print("\nNext steps:")
-    print("- Try modifying agent personalities")
-    print("- Add more agents")
-    print("- Implement conversation topics or goals")
-    print("- Add spatial elements (grid placement)")
-    print("- Create custom visualizations")
-
-
-if __name__ == "__main__":
-    main()
